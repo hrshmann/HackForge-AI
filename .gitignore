@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+data/
+models/best_model.pt
+models/codebert-local/
+tools/sqlmap/
+tools/xsstrike/
+*.log
+.env
