@@ -10,13 +10,20 @@ from tools.security_headers import SecurityHeadersAnalyzer
 
 class ActiveVulnerabilityTester:
     def __init__(self, crawl_data: Dict, ml_predictions: Dict = None):
-        self.crawl_data = crawl_data
+        self.crawl_data = crawl_data or {}
         self.ml_predictions = ml_predictions or {}
         self.results = []
         self.tested_targets = set()
+        self.http_headers = {
+            "User-Agent": "Mozilla/5.0 HackForgeAI Security Scanner",
+            "Accept": "*/*"
+        }
 
     def run_tests(self, max_workers: int = 3) -> List[Dict]:
         test_tasks = self._plan_tests()
+
+        if not test_tasks:
+            return []
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
@@ -26,7 +33,7 @@ class ActiveVulnerabilityTester:
 
             for future in as_completed(futures):
                 try:
-                    result = future.result(timeout=250)
+                    result = future.result(timeout=180)
                     if result:
                         if isinstance(result, list):
                             self.results.extend(result)
@@ -39,7 +46,6 @@ class ActiveVulnerabilityTester:
 
     def _plan_tests(self) -> List[Dict]:
         tasks = []
-
         suspicious_targets = set()
 
         for url, vulns in self.ml_predictions.items():
@@ -83,10 +89,15 @@ class ActiveVulnerabilityTester:
                     'priority': 'medium'
                 })
 
-        # site-wide one time only
+        base_target = (
+            self.crawl_data.get('pages')[0].get('url', 'site-wide')
+            if self.crawl_data.get('pages')
+            else 'site-wide'
+        )
+
         tasks.append({
             'type': 'security_headers',
-            'target': self.crawl_data.get('pages', [{}])[0].get('url', 'site-wide'),
+            'target': base_target,
             'headers': self.crawl_data.get('headers', {}),
             'priority': 'low'
         })
@@ -100,7 +111,8 @@ class ActiveVulnerabilityTester:
 
         priority_map = {'high': 0, 'medium': 1, 'low': 2}
         tasks.sort(key=lambda x: priority_map[x['priority']])
-        return tasks[:12]
+
+        return tasks[:10]
 
     def _execute_test(self, task: Dict):
         if task['type'] == 'sql_injection':
@@ -116,10 +128,8 @@ class ActiveVulnerabilityTester:
         return None
 
     def _test_sql_injection(self, task: Dict):
-        print(f"[SQLi] Testing {task['target']}")
-
         sqlmap = SQLMapWrapper(task['target'], task.get('data'))
-        sqlmap_result = sqlmap.scan(level=2, risk=1, timeout=90)
+        sqlmap_result = sqlmap.scan(level=2, risk=1, timeout=60)
 
         manual_result = self._manual_sql_probe(task['target'], task.get('data'))
         final_conf = max(sqlmap_result.get('confidence', 0), manual_result.get('confidence', 0))
@@ -145,17 +155,17 @@ class ActiveVulnerabilityTester:
         if not data:
             return {'vulnerable': False, 'confidence': 0.0, 'details': {}}
 
-        payload_true = "' OR '1'='1"
-        payload_false = "' AND '1'='2"
-
         try:
+            payload_true = "' OR '1'='1"
+            payload_false = "' AND '1'='2"
+
             true_data = {k: payload_true for k in data.keys()}
             false_data = {k: payload_false for k in data.keys()}
 
-            r1 = requests.post(url, data=true_data, timeout=8, verify=False)
-            r2 = requests.post(url, data=false_data, timeout=8, verify=False)
+            r1 = requests.post(url, data=true_data, timeout=6, verify=False, headers=self.http_headers)
+            r2 = requests.post(url, data=false_data, timeout=6, verify=False, headers=self.http_headers)
 
-            similarity = difflib.SequenceMatcher(None, r1.text[:800], r2.text[:800]).ratio()
+            similarity = difflib.SequenceMatcher(None, r1.text[:700], r2.text[:700]).ratio()
             combined = (r1.text + r2.text).lower()
 
             sql_errors = ['sql syntax', 'mysql', 'syntax error', 'database error', 'odbc', 'sqlite']
@@ -172,10 +182,8 @@ class ActiveVulnerabilityTester:
         return {'vulnerable': False, 'confidence': 0.0, 'details': {}}
 
     def _test_xss(self, task: Dict):
-        print(f"[XSS] Testing {task['target']}")
-
         xs = XSStrikeWrapper(task['target'])
-        xs_result = xs.scan(timeout=90)
+        xs_result = xs.scan(timeout=60)
 
         reflected_result = self._manual_xss_probe(task['target'], task.get('data'))
         final_conf = max(xs_result.get('confidence', 0), reflected_result.get('confidence', 0))
@@ -203,11 +211,11 @@ class ActiveVulnerabilityTester:
         if not data:
             return {'vulnerable': False, 'confidence': 0.0, 'details': {}}
 
-        payload = '<script>alert(1)</script>'
-
         try:
+            payload = '<script>alert(1)</script>'
             xss_data = {k: payload for k in data.keys()}
-            r = requests.post(url, data=xss_data, timeout=8, verify=False)
+
+            r = requests.post(url, data=xss_data, timeout=6, verify=False, headers=self.http_headers)
             body = r.text.lower()
 
             if payload.lower() in body or '&lt;script&gt;alert(1)&lt;/script&gt;' in body:
@@ -228,7 +236,7 @@ class ActiveVulnerabilityTester:
         if result['score'] < 65:
             return {
                 'vulnerability_type': 'Security Misconfiguration',
-                'url': 'site-wide',
+                'url': task['target'],
                 'severity': 'medium',
                 'confidence': 0.78,
                 'details': result,
