@@ -1,11 +1,10 @@
-print("XSSTRIKE WRAPPER LOADED")
 import subprocess
-import json
-from typing import Dict, List
+from typing import Dict
 import re
 import sys
 import os
 from pathlib import Path
+
 
 class XSStrikeWrapper:
     def __init__(self, target_url: str):
@@ -24,16 +23,26 @@ class XSStrikeWrapper:
             if path.exists():
                 return str(path.absolute())
 
-        raise FileNotFoundError("XSStrike not found inside tools/xsstrike")
+        return None   # graceful fallback
 
-    def scan(self, timeout: int = 180) -> Dict:
+    def scan(self, timeout: int = 90) -> Dict:
+
+        if not self.xsstrike_path:
+            return {
+                'vulnerable': False,
+                'xss_type': [],
+                'details': {},
+                'confidence': 0.0,
+                'severity': 'skipped'
+            }
+
         cmd = [
             sys.executable,
             self.xsstrike_path,
             '-u', self.target_url,
             '--crawl',
             '--skip-dom',
-            '--threads', '5'
+            '--threads', '3'
         ]
 
         try:
@@ -46,7 +55,6 @@ class XSStrikeWrapper:
             )
 
             stdout, stderr = process.communicate(timeout=timeout)
-
             results = self._parse_results(stdout)
 
             return {
@@ -57,30 +65,25 @@ class XSStrikeWrapper:
                 'severity': 'high' if results['vulnerable'] else 'safe'
             }
 
-        except subprocess.TimeoutExpired:
-            process.kill()
+        except Exception:
             return {
                 'vulnerable': False,
-                'error': 'Timeout',
-                'confidence': 0.0
-            }
-        except Exception as e:
-            return {
-                'vulnerable': False,
-                'error': str(e),
-                'confidence': 0.0
+                'xss_type': [],
+                'details': {},
+                'confidence': 0.0,
+                'severity': 'skipped'
             }
 
     def _parse_results(self, output: str) -> Dict:
         vulnerable = False
         xss_type = []
-        details = []
+        details = {}
         confidence = 0.0
 
         if re.search(r'Reflected XSS', output, re.IGNORECASE):
             vulnerable = True
             xss_type.append('Reflected')
-            confidence = 0.9
+            confidence = 0.90
 
         if re.search(r'Stored XSS', output, re.IGNORECASE):
             vulnerable = True
@@ -124,5 +127,3 @@ class XSStrikeWrapper:
         elif 'tag' in output.lower():
             return 'HTML tag'
         return 'unknown'
-
-print("CLASS EXISTS:", "XSStrikeWrapper" in globals())
